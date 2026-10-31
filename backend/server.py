@@ -16,7 +16,6 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from jose import JWTError, jwt
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleRequest
@@ -24,11 +23,7 @@ import os
 import secrets
 import logging
 import uuid
-import shutil
-import io
-import json
 import zipfile
-import requests
 import time
 import re
 import bcrypt
@@ -48,11 +43,20 @@ load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
+if mongo_url.startswith("mongomock://"):
+    # In-memory database for tests and local trials without MongoDB. Data is lost on restart.
+    from mongomock_motor import AsyncMongoMockClient
+
+    client = AsyncMongoMockClient()
+else:
+    client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 # Create uploads directory
-UPLOAD_DIR = ROOT_DIR / "uploads"
+# Uploads and encryption keys live under UNISHARE_DATA_DIR (default: next to server.py).
+DATA_DIR = Path(os.getenv("UNISHARE_DATA_DIR") or ROOT_DIR)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -69,7 +73,7 @@ if not SECRET_KEY:
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
 # Encryption Keys Setup
-KEYS_DIR = ROOT_DIR / "keys"
+KEYS_DIR = DATA_DIR / "keys"
 KEYS_DIR.mkdir(exist_ok=True)
 PRIVATE_KEY_PATH = KEYS_DIR / "private_key.pem"
 PUBLIC_KEY_PATH = KEYS_DIR / "public_key.pem"
@@ -513,14 +517,6 @@ class HistoryResponse(BaseModel):
     file_name: str
     timestamp: str
     details: Optional[str]
-    shared_with_users: List[str] = []
-
-class HistoryResponse(BaseModel):
-    id: str
-    action: str
-    file_name: str
-    timestamp: str
-    details: Optional[str]
 
 
 class ChatMessage(BaseModel):
@@ -562,7 +558,7 @@ class DriveFileInfo(BaseModel):
 # Helper Functions
 # ============================================================================
 
-ADMIN_CREDS_PATH = ROOT_DIR / "ADMIN_CREDENTIALS.txt"
+ADMIN_CREDS_PATH = DATA_DIR / "ADMIN_CREDENTIALS.txt"
 
 def _truncate_to_72_bytes(password: str) -> bytes:
     """Truncate password to 72 bytes (bcrypt limit), not 72 characters."""
@@ -1586,7 +1582,7 @@ async def google_auth():
             prompt='consent'
         )
         
-        logger.info(f"Google OAuth initiated")
+        logger.info("Google OAuth initiated")
         return {"authorization_url": authorization_url, "state": state}
     
     except HTTPException:
@@ -1726,7 +1722,7 @@ async def upload_file(
         if not await check_data_limit(current_user, file_size):
             raise HTTPException(
                 status_code=403,
-                detail=f"Guest data limit exceeded (2GB). Please create an account to continue sharing."
+                detail="Guest data limit exceeded (2GB). Please create an account to continue sharing."
             )
         
         # Generate unique file ID
@@ -1873,8 +1869,6 @@ async def download_file(file_id: str, current_user: Optional[User] = Depends(get
             if drive_file_id:
                 # Return a direct download link
                 return {"download_url": f"https://drive.google.com/uc?export=download&id={drive_file_id}"}
-        
-        file_path = UPLOAD_DIR / file_doc['filename']
         
         file_path = UPLOAD_DIR / file_doc['filename']
         
@@ -2387,7 +2381,7 @@ async def share_drive_file(
         if not await check_data_limit(current_user, file_size):
             raise HTTPException(
                 status_code=403,
-                detail=f"Guest data limit exceeded (2GB). Please create an account to continue sharing."
+                detail="Guest data limit exceeded (2GB). Please create an account to continue sharing."
             )
         
         # Parse shared_with

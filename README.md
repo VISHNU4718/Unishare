@@ -80,24 +80,45 @@ GOOGLE_DRIVE_REDIRECT_URI=""
 REACT_APP_BACKEND_URL=https://your-backend-url.com
 ```
 
-RSA/Fernet keys are auto-generated on first boot into `backend/keys/`.
+Other backend variables:
+
+- `ENV=production` makes `SECRET_KEY` mandatory.
+- `ADMIN_EMAIL` / `ADMIN_PASSWORD` seed the first admin account. If the password is unset, a random one is generated and written to `ADMIN_CREDENTIALS.txt` (git-ignored).
+- `UNISHARE_DATA_DIR` sets where `uploads/`, `keys/` and the admin credentials file are stored. Default: the `backend/` directory.
+- `MONGO_URL=mongomock://local` uses an in-memory database (needs `requirements-dev.txt`). Data is lost on restart. It exists for the test-suite and quick local trials.
+
+RSA/Fernet keys are auto-generated on first boot into `<data dir>/keys/`. Keep that directory: files already uploaded can only be decrypted with the key that encrypted them.
 
 ## Data Limits
 
 - **Guest users:** 2 GB total (enforced server-side)
-- **Registered users:** unlimited
+- **Registered users:** no total cap
+- **Cloud upload:** 100 MB per file; use P2P for anything larger
+
+## Tests
+
+```bash
+pip install -r backend/requirements-dev.txt
+python -m pytest tests
+```
+
+The backend tests run against an in-memory database and a temporary data directory. They cover auth, upload/download with encryption on disk, private-file access control, deletion, chat validation and admin permissions. The frontend has no automated tests; CI only checks that it builds.
 
 ## Deployment
 
-- Backend: Dockerized FastAPI, deployable to Render / AWS (see `render.yaml`)
-- Frontend: React build served by nginx; `REACT_APP_BACKEND_URL` must point at the deployed backend
+- Backend: Dockerized FastAPI. `render.yaml` describes a Render web service; it needs a MongoDB connection string (for example MongoDB Atlas) and a persistent disk for `UNISHARE_DATA_DIR`, otherwise uploads and keys are lost on redeploy.
+- Frontend: React build served by nginx; `REACT_APP_BACKEND_URL` must point at the deployed backend.
+
+### Why there is no hosted demo
+
+The app needs three things that a serverless host such as Vercel does not provide: long-lived WebSocket connections (chat and P2P signaling), a persistent disk for encrypted uploads and the server keys, and one shared MongoDB. Running it there would silently lose data between requests, so no live demo is published. Run it with Docker as above.
 
 ## Project Layout
 
 ```
-backend/    FastAPI server (server.py, keys/, uploads/)
+backend/    FastAPI server (server.py), requirements*.txt
 frontend/   React 18 + CRACO + Tailwind + shadcn/ui
-tests/      backend tests
+tests/      backend tests (pytest)
 ```
 
 ## Author

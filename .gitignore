@@ -105,3 +105,6 @@ test_*.png
 test_*.jpg
 test_*.jpeg
 frontend.log
+
+# Generated encryption keys
+backend/keys/
