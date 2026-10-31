@@ -50,8 +50,8 @@ Frontend (port 3000, CRACO):
 
 ```bash
 cd frontend
-yarn install
-yarn start
+npm ci
+npm start
 ```
 
 > Keep `REACT_APP_BACKEND_URL` aligned with whichever backend you run (empty string = same-origin; Docker nginx proxies `/api`).
