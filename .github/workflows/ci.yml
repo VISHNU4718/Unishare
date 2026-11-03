@@ -19,7 +19,7 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
       - run: pip install -r backend/requirements-dev.txt
-      - run: ruff check --isolated --select E9,F backend/server.py tests
+      - run: ruff check backend tests
       - run: python -m pytest tests -q
 
   frontend:
@@ -35,6 +35,10 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      - run: npm run lint
+      - run: npx craco test --watchAll=false
+        env:
+          CI: "true"
       - run: npx craco build
         env:
           CI: "false"

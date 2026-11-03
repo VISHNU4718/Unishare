@@ -86,8 +86,8 @@ const LoginPage = ({ onSuccess, onGuestMode, onBack }) => {
                 </svg>
               </div>
               <div>
-                <h3 className="font-semibold text-lg text-gray-900 dark:text-white">Lightning Fast</h3>
-                <p className="text-gray-600 dark:text-gray-400">Upload and share files instantly with our optimized infrastructure</p>
+                <h3 className="font-semibold text-lg text-gray-900 dark:text-white">Fast sharing</h3>
+                <p className="text-gray-600 dark:text-gray-400">Upload to the server or send directly to another device</p>
               </div>
             </div>
             
@@ -99,7 +99,7 @@ const LoginPage = ({ onSuccess, onGuestMode, onBack }) => {
               </div>
               <div>
                 <h3 className="font-semibold text-lg text-gray-900 dark:text-white">Secure & Private</h3>
-                <p className="text-gray-600 dark:text-gray-400">Your files are encrypted and protected with industry-standard security</p>
+                <p className="text-gray-600 dark:text-gray-400">Uploaded files are encrypted at rest on the server</p>
               </div>
             </div>
             

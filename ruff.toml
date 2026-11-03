@@ -1,0 +1,10 @@
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W", "B"]
+ignore = [
+  "E501",  # long lines are tolerated
+  "B008",  # FastAPI's Depends()/File()/Query() in argument defaults is idiomatic
+  "B904",  # re-raising HTTPException inside except blocks is deliberate here
+]

@@ -1,43 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React from 'react';
 import { Share2, Upload, Zap, Shield, Cloud, ArrowRight, MessageCircle, HardDrive } from 'lucide-react';
-import RickrollModal from './RickrollModal';
-
-const KONAMI = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
 
 const WelcomeScreen = ({ onGetStarted }) => {
-  const [showRickroll, setShowRickroll] = useState(false);
-  const konamiIdxRef = useRef(0);
-  const rickTypingRef = useRef('');
-
-  // Secret rickroll triggers: Konami code OR typing "rick".
-  useEffect(() => {
-    const onKey = (e) => {
-      // Konami
-      const expected = KONAMI[konamiIdxRef.current];
-      if (e.key === expected || e.key.toLowerCase() === expected) {
-        konamiIdxRef.current += 1;
-        if (konamiIdxRef.current >= KONAMI.length) {
-          konamiIdxRef.current = 0;
-          setShowRickroll(true);
-          return;
-        }
-      } else {
-        konamiIdxRef.current = e.key === KONAMI[0] ? 1 : 0;
-      }
-
-      // Type "rick"
-      if (/^[a-z]$/i.test(e.key)) {
-        rickTypingRef.current = (rickTypingRef.current + e.key.toLowerCase()).slice(-4);
-        if (rickTypingRef.current === 'rick') {
-          rickTypingRef.current = '';
-          setShowRickroll(true);
-        }
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
   return (
     <>
       <div className="dark min-h-screen text-white welcome-scroll">
@@ -85,19 +49,19 @@ const WelcomeScreen = ({ onGetStarted }) => {
               <FeatureCard
                 icon={<Upload className="w-6 h-6" />}
                 title="Upload anything"
-                description="Drag, drop, import from Drive, or stream multi-GB files directly between tabs."
+                description="Drag and drop files or folders, import from Google Drive, or send large files peer to peer."
                 delay={250}
               />
               <FeatureCard
                 icon={<Zap className="w-6 h-6" />}
-                title="Lightning P2P"
-                description="WebRTC + BroadcastChannel for same-network speeds. Receiver streams straight to disk."
+                title="Direct P2P"
+                description="Send files straight to another device over WebRTC, without uploading them first."
                 delay={400}
               />
               <FeatureCard
                 icon={<Shield className="w-6 h-6" />}
                 title="Yours, encrypted"
-                description="Per-file Fernet keys, RSA-wrapped. Guest data wipes itself when you leave."
+                description="Uploads are encrypted on the server with per-file keys, which are RSA-wrapped."
                 delay={550}
               />
             </div>
@@ -115,17 +79,12 @@ const WelcomeScreen = ({ onGetStarted }) => {
               </button>
 
               <p className="mt-5 text-slate-400 text-sm">
-                No signup required &middot; Guest mode wipes itself when you leave
-              </p>
-              <p className="mt-1 text-slate-600 text-[11px] tracking-wider uppercase">
-                Try the Konami code if you&rsquo;re bored
+                No signup required &middot; Guest chat messages are deleted after you leave
               </p>
             </div>
           </div>
         </div>
       </div>
-
-      <RickrollModal isOpen={showRickroll} onClose={() => setShowRickroll(false)} />
 
       <style>{`
         @keyframes welcomeStaggerIn {

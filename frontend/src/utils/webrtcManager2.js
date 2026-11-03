@@ -1,5 +1,6 @@
 // Enhanced WebRTC Manager with DataChannels for P2P file sharing
 import { getWebRtcIceServers, isOfflineMode } from './offline';
+import { getAuthToken } from './authStorage';
 
 class WebRTCManager {
   constructor() {
@@ -69,6 +70,8 @@ class WebRTCManager {
     const params = new URLSearchParams();
     if (username) params.append('username', username);
     if (emoji) params.append('emoji', emoji);
+    const token = getAuthToken();
+    if (token) params.append('token', token);
 
     if (params.toString()) {
       url += `?${params.toString()}`;
@@ -107,8 +110,8 @@ class WebRTCManager {
       if (event?.target?.__skipReconnect) {
         return;
       }
-      if (this.manualDisconnect) {
-        return;
+      if (this.manualDisconnect || event?.code === 4401) {
+        return; // 4401: the server rejected our token; retrying will not help
       }
       if (!this.backendUrl) {
         return;
