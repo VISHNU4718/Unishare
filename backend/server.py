@@ -10,7 +10,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import OperationFailure
-from pydantic import BaseModel, Field, ConfigDict, EmailStr
+from pydantic import BaseModel, Field, ConfigDict, EmailStr, field_validator
 from typing import List, Optional, Dict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -19,6 +19,7 @@ from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleRequest
+import asyncio
 import os
 import secrets
 import logging
@@ -32,6 +33,8 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.backends import default_backend
 import base64
+import io
+from urllib.parse import quote
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -127,7 +130,7 @@ def encrypt_file_content(content: bytes) -> tuple[bytes, bytes]:
     key = Fernet.generate_key()
     f = Fernet(key)
     encrypted_content = f.encrypt(content)
-    
+
     encrypted_key = server_public_key.encrypt(
         key,
         padding.OAEP(
@@ -141,7 +144,7 @@ def encrypt_file_content(content: bytes) -> tuple[bytes, bytes]:
 def decrypt_file_content(encrypted_content: bytes, encrypted_key_b64: bytes) -> bytes:
     """Decrypt the AES key with RSA, then decrypt content with AES"""
     encrypted_key = base64.b64decode(encrypted_key_b64)
-    
+
     key = server_private_key.decrypt(
         encrypted_key,
         padding.OAEP(
@@ -150,12 +153,16 @@ def decrypt_file_content(encrypted_content: bytes, encrypted_key_b64: bytes) -> 
             label=None
         )
     )
-    
+
     f = Fernet(key)
     return f.decrypt(encrypted_content)
 
 # Guest data limit (2GB in bytes)
 GUEST_DATA_LIMIT = 2 * 1024 * 1024 * 1024  # 2GB
+CLOUD_UPLOAD_MAX = 100 * 1024 * 1024  # 100 MB per file
+
+USERNAME_MIN, USERNAME_MAX = 2, 32
+PASSWORD_MIN, PASSWORD_MAX = 8, 128
 
 # ============================================================================
 # Database Indexes and Startup Configuration
@@ -171,13 +178,13 @@ async def lifespan(app: FastAPI):
         await db.users.create_index("email", unique=True, sparse=True)
         await db.users.create_index("username")
         await db.users.create_index([("is_guest", 1), ("created_date", -1)])
-        
+
         # Files collection indexes
         await db.files.create_index("id", unique=True)
         await db.files.create_index([("owner_id", 1), ("upload_date", -1)])
         await db.files.create_index([("is_public", 1), ("upload_date", -1)])
         await db.files.create_index("drive_file_id", sparse=True)
-        
+
         # History collection indexes
         await db.history.create_index([("user_id", 1), ("timestamp", -1)])
 
@@ -240,7 +247,6 @@ security = HTTPBearer()
 # ============================================================================
 # Chat message TTL infrastructure
 # ============================================================================
-import asyncio
 
 # Pending guest cleanup tasks keyed by user_id. Cancelled on reconnect within window.
 guest_msg_cleanup_tasks: Dict[str, "asyncio.Task"] = {}
@@ -352,7 +358,7 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
         self.user_info: Dict[str, dict] = {}
-    
+
     async def connect(self, user_id: str, websocket: WebSocket, username: str = None, emoji: str = None):
         await websocket.accept()
         self.active_connections[user_id] = websocket
@@ -364,14 +370,14 @@ class ConnectionManager:
         logger.info(f"User {user_id} ({username}) connected")
         # Notify all users about new connection
         await self.broadcast_online_users()
-    
+
     def disconnect(self, user_id: str):
         if user_id in self.active_connections:
             del self.active_connections[user_id]
         if user_id in self.user_info:
             del self.user_info[user_id]
         logger.info(f"User {user_id} disconnected")
-    
+
     async def send_message(self, user_id: str, message: dict):
         if user_id in self.active_connections:
             try:
@@ -384,7 +390,7 @@ class ConnectionManager:
                 else:
                     logger.error(f"Error sending message to {user_id}: {e}")
                 self.disconnect(user_id)
-    
+
     async def broadcast_online_users(self):
         """Notify all connected users about who's online"""
         online_users = []
@@ -421,6 +427,21 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: Optional[str] = None  # Optional for guests
 
+    @field_validator("username")
+    @classmethod
+    def _check_username(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not USERNAME_MIN <= len(v) <= USERNAME_MAX:
+            raise ValueError(f"Username must be {USERNAME_MIN}-{USERNAME_MAX} characters")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def _check_password(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not PASSWORD_MIN <= len(v) <= PASSWORD_MAX:
+            raise ValueError(f"Password must be {PASSWORD_MIN}-{PASSWORD_MAX} characters")
+        return v
+
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
@@ -428,6 +449,21 @@ class UserLogin(BaseModel):
 class GuestCreate(BaseModel):
     username: str
     emoji: str = "👤"
+
+    @field_validator("username")
+    @classmethod
+    def _check_username(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not USERNAME_MIN <= len(v) <= USERNAME_MAX:
+            raise ValueError(f"Username must be {USERNAME_MIN}-{USERNAME_MAX} characters")
+        return v
+
+    @field_validator("emoji")
+    @classmethod
+    def _check_emoji(cls, v: str) -> str:
+        if not v or len(v) > 8:
+            raise ValueError("Emoji must be 1-8 characters")
+        return v
 
 class User(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -472,7 +508,7 @@ class Token(BaseModel):
 
 class FileMetadata(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     filename: str
     original_filename: str
@@ -675,7 +711,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-    
+
     user_doc = await db.users.find_one({"id": user_id}, {"_id": 0})
     if user_doc is None:
         raise HTTPException(status_code=401, detail="User not found")
@@ -728,14 +764,78 @@ async def get_optional_user(
 
     return User(**user_doc)
 
+
+# ============================================================================
+# Input sanitising helpers
+# ============================================================================
+
+def safe_filename(name: Optional[str]) -> str:
+    """Return a display filename with no directory parts or control characters."""
+    name = (name or "").replace("\\", "/").split("/")[-1]
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name).strip()
+    return name[:255] or "file"
+
+
+def safe_extension(name: str) -> str:
+    """Extension used for the on-disk name: short and alphanumeric only."""
+    ext = Path(name).suffix
+    return ext if re.fullmatch(r"\.[A-Za-z0-9]{1,10}", ext) else ""
+
+
+def safe_relpath(path: Optional[str]) -> Optional[str]:
+    """Normalise a client-supplied folder path: no absolute paths, '.' or '..' segments."""
+    if not path:
+        return None
+    parts = [
+        re.sub(r"[\x00-\x1f\x7f]", "", p).strip()
+        for p in path.replace("\\", "/").split("/")
+    ]
+    parts = [p for p in parts if p and p not in (".", "..")]
+    cleaned = "/".join(parts)[:512]
+    return cleaned or None
+
+
+def content_disposition(kind: str, filename: str) -> str:
+    """Build a Content-Disposition header that is safe for any filename (RFC 6266 / 5987)."""
+    ascii_name = re.sub(r'[^A-Za-z0-9._ -]', "_", filename) or "file"
+    return f"{kind}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+async def read_upload_capped(upload: UploadFile, limit: int) -> bytes:
+    """Read an upload in chunks and stop as soon as it exceeds ``limit`` bytes."""
+    chunks, total = [], 0
+    while True:
+        chunk = await upload.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(
+                status_code=413,
+                detail="File exceeds the 100 MB cloud upload limit. Send it directly to a peer instead.",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def user_can_access(file_doc: dict, user: Optional["User"]) -> bool:
+    """Public files are open; private ones need the owner or a user the file is shared with."""
+    if file_doc.get("is_public", True):
+        return True
+    if user is None:
+        return False
+    if file_doc.get("owner_id") == user.id:
+        return True
+    return bool(user.email) and user.email in (file_doc.get("shared_with_users") or [])
+
 async def check_data_limit(user: User, file_size: int) -> bool:
     """Check if user can upload more data (2GB limit for guests)"""
     if not user.is_guest:
         return True  # No limit for logged-in users
-    
+
     if user.total_data_shared + file_size > GUEST_DATA_LIMIT:
         return False
-    
+
     return True
 
 async def update_user_data_shared(user_id: str, file_size: int):
@@ -801,16 +901,16 @@ async def create_guest(request: Request, guest: GuestCreate):
             emoji=guest.emoji,
             is_guest=True
         )
-        
+
         doc = user.model_dump()
         if doc.get('email') is None:
             del doc['email']
         doc['created_date'] = doc['created_date'].isoformat()
         await db.users.insert_one(doc)
-        
+
         # Create access token
         access_token = create_access_token(data={"sub": user.id})
-        
+
         user_response = UserResponse(
             id=user.id,
             username=user.username,
@@ -823,20 +923,22 @@ async def create_guest(request: Request, guest: GuestCreate):
             google_drive_connected=user.google_drive_connected,
             created_date=doc['created_date']
         )
-        
+
         return Token(access_token=access_token, token_type="bearer", user=user_response)
 
     except HTTPException:
         raise
-    
+
     except Exception as e:
         logger.error(f"Guest creation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Guest creation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Guest creation failed")
 
 @api_router.post("/auth/register", response_model=Token)
 @limiter.limit("5/minute")
 async def register(request: Request, user_create: UserCreate):
     """Register a new user account - Rate limited to 5 per minute"""
+    if not user_create.email or not user_create.password:
+        raise HTTPException(status_code=422, detail="Email and password are required")
     try:
         # Check if email already exists
         existing_user = await db.users.find_one({"email": user_create.email})
@@ -844,7 +946,7 @@ async def register(request: Request, user_create: UserCreate):
             raise HTTPException(status_code=400, detail="Email already registered")
 
         username = await ensure_username_available(user_create.username)
-        
+
         # Create user
         user = User(
             username=username,
@@ -853,14 +955,14 @@ async def register(request: Request, user_create: UserCreate):
             is_guest=False,
             emoji="👤"
         )
-        
+
         doc = user.model_dump()
         doc['created_date'] = doc['created_date'].isoformat()
         await db.users.insert_one(doc)
-        
+
         # Create access token
         access_token = create_access_token(data={"sub": user.id})
-        
+
         user_response = UserResponse(
             id=user.id,
             username=user.username,
@@ -873,14 +975,14 @@ async def register(request: Request, user_create: UserCreate):
             google_drive_connected=user.google_drive_connected,
             created_date=doc['created_date']
         )
-        
+
         return Token(access_token=access_token, token_type="bearer", user=user_response)
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Registration failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Registration failed")
 
 @api_router.post("/auth/login", response_model=Token)
 @limiter.limit("10/minute")
@@ -891,7 +993,7 @@ async def login(request: Request, user_login: UserLogin):
         user_doc = await db.users.find_one({"email": user_login.email}, {"_id": 0})
         if not user_doc:
             raise HTTPException(status_code=401, detail="Invalid email or password")
-        
+
         user = User(**user_doc)
 
         # Verify password
@@ -924,7 +1026,7 @@ async def login(request: Request, user_login: UserLogin):
         raise
     except Exception as e:
         logger.error(f"Login failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Login failed")
 
 async def _wipe_guest_data(user_id: str) -> dict:
     """Delete a guest user's files (disk + DB), history, and the user doc."""
@@ -972,7 +1074,7 @@ async def logout(current_user: User = Depends(get_current_user)):
         return {"success": True, "wiped": True, **stats}
     except Exception as e:
         logger.error(f"Logout failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Logout failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Logout failed")
 
 
 @api_router.post("/auth/logout-beacon")
@@ -1551,13 +1653,13 @@ async def google_auth():
         client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
         backend_url = os.getenv('BACKEND_URL', 'http://localhost:8001')
         redirect_uri = f"{backend_url}/api/auth/google/callback"
-        
+
         if not client_id or not client_secret:
             raise HTTPException(
                 status_code=500,
                 detail="Google OAuth not configured"
             )
-        
+
         flow = Flow.from_client_config(
             {
                 "web": {
@@ -1575,21 +1677,21 @@ async def google_auth():
             ],
             redirect_uri=redirect_uri
         )
-        
+
         authorization_url, state = flow.authorization_url(
             access_type='offline',
             include_granted_scopes='true',
             prompt='consent'
         )
-        
+
         logger.info("Google OAuth initiated")
         return {"authorization_url": authorization_url, "state": state}
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to initiate Google OAuth: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initiate Google OAuth: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to initiate Google OAuth")
 
 @api_router.get("/auth/google/callback")
 async def google_auth_callback(code: str = Query(...), state: str = Query(None)):
@@ -1600,7 +1702,7 @@ async def google_auth_callback(code: str = Query(...), state: str = Query(None))
         backend_url = os.getenv('BACKEND_URL', 'http://localhost:8001')
         redirect_uri = f"{backend_url}/api/auth/google/callback"
         frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
-        
+
         flow = Flow.from_client_config(
             {
                 "web": {
@@ -1614,10 +1716,10 @@ async def google_auth_callback(code: str = Query(...), state: str = Query(None))
             scopes=None,
             redirect_uri=redirect_uri
         )
-        
+
         flow.fetch_token(code=code)
         credentials = flow.credentials
-        
+
         # Get user info from Google
         import requests
         userinfo_response = requests.get(
@@ -1625,14 +1727,14 @@ async def google_auth_callback(code: str = Query(...), state: str = Query(None))
             headers={'Authorization': f'Bearer {credentials.token}'}
         )
         userinfo = userinfo_response.json()
-        
+
         google_id = userinfo.get('id')
         email = userinfo.get('email')
         name = userinfo.get('name', email.split('@')[0])
-        
+
         # Check if user exists
         user_doc = await db.users.find_one({"email": email}, {"_id": 0})
-        
+
         if user_doc:
             # Existing user - login
             user = User(**user_doc)
@@ -1645,30 +1747,30 @@ async def google_auth_callback(code: str = Query(...), state: str = Query(None))
                 emoji="👤",
                 google_id=google_id
             )
-            
+
             doc = user.model_dump()
             doc['created_date'] = doc['created_date'].isoformat()
             # Store Google Access Token (In production, encrypt this!)
             doc['google_access_token'] = credentials.token
             await db.users.insert_one(doc)
-            
+
         if user_doc:
              # Update token for existing user
              await db.users.update_one(
                  {"email": email},
                  {"$set": {"google_access_token": credentials.token, "google_drive_connected": True}}
              )
-        
+
         # Create access token
         access_token = create_access_token(data={"sub": user.id})
-        
+
         # Redirect to frontend with token
         return RedirectResponse(url=f"{frontend_url}?google_auth=success&token={access_token}&user_id={user.id}&google_drive_prompt=true")
-    
+
     except Exception as e:
         logger.error(f"Google OAuth callback failed: {e}")
         frontend_url = os.getenv('FRONTEND_URL', os.getenv('REACT_APP_BACKEND_URL', ''))
-        return RedirectResponse(url=f"{frontend_url}?google_auth=error&error={str(e)}")
+        return RedirectResponse(url=f"{frontend_url}?google_auth=error&error={quote(str(e))}")
 
 
 
@@ -1688,7 +1790,7 @@ async def get_history(current_user: User = Depends(get_current_user)):
         ]
     except Exception as e:
         logger.error(f"Failed to fetch history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch history")
 
 # ============================================================================
 # File Management Routes
@@ -1707,45 +1809,43 @@ async def upload_file(
     """Upload a file - Rate limited to 30 uploads per minute"""
     try:
         # Check data limit
-        file_size = 0
-        content = await file.read()
+        if current_user.is_blocked:
+            raise HTTPException(status_code=403, detail="Your account is blocked")
+        original_name = safe_filename(file.filename)
+        # Hard cloud-upload cap (use P2P for anything larger); read in chunks so
+        # an oversized body is rejected without being buffered whole.
+        content = await read_upload_capped(file, CLOUD_UPLOAD_MAX)
         file_size = len(content)
-
-        # Hard cloud-upload cap (use P2P for anything larger)
-        CLOUD_UPLOAD_MAX = 100 * 1024 * 1024
-        if file_size > CLOUD_UPLOAD_MAX:
-            raise HTTPException(
-                status_code=413,
-                detail="File exceeds the 100 MB cloud upload limit. Send it directly to a peer instead."
-            )
 
         if not await check_data_limit(current_user, file_size):
             raise HTTPException(
                 status_code=403,
                 detail="Guest data limit exceeded (2GB). Please create an account to continue sharing."
             )
-        
+
+        clean_folder = safe_relpath(folder_path)
+
         # Generate unique file ID
         file_id = str(uuid.uuid4())
-        file_extension = Path(file.filename).suffix
+        file_extension = safe_extension(original_name)
         stored_filename = f"{file_id}{file_extension}"
         file_path = UPLOAD_DIR / stored_filename
-        
+
         # Encrypt content
         encrypted_content, encrypted_key = encrypt_file_content(content)
-        
+
         # Save encrypted file to disk
         with open(file_path, "wb") as buffer:
             buffer.write(encrypted_content)
-            
+
         # Parse shared_with
-        shared_users = [email.strip() for email in shared_with.split(',') if email.strip()]
-        
+        shared_users = [email.strip() for email in shared_with.split(',') if email.strip()][:50]
+
         # Create metadata
         file_metadata = FileMetadata(
             id=file_id,
             filename=stored_filename,
-            original_filename=file.filename,
+            original_filename=original_name,
             size=file_size,
             content_type=file.content_type,
             owner_id=current_user.id,
@@ -1755,9 +1855,9 @@ async def upload_file(
             shared_with_users=shared_users,
             source="upload",
             encrypted_key=encrypted_key.decode('utf-8'),
-            folder_path=folder_path if folder_path else None
+            folder_path=clean_folder
         )
-        
+
         # Save metadata to MongoDB
         doc = file_metadata.model_dump()
         doc['upload_date'] = doc['upload_date'].isoformat()
@@ -1775,13 +1875,13 @@ async def upload_file(
         })
 
         # Log history
-        await log_history(current_user.id, "upload", file.filename, file_id, f"Size: {file_size} bytes")
-        
+        await log_history(current_user.id, "upload", original_name, file_id, f"Size: {file_size} bytes")
+
         # Return response
         return FileResponse(
             id=file_id,
             filename=stored_filename,
-            original_filename=file.filename,
+            original_filename=original_name,
             size=file_size,
             content_type=file.content_type,
             upload_date=doc['upload_date'],
@@ -1793,21 +1893,21 @@ async def upload_file(
             is_public=is_public,
             source="upload",
             shared_with_users=shared_users,
-            folder_path=folder_path if folder_path else None
+            folder_path=clean_folder
         )
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"File upload failed: {e}")
-        raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="File upload failed")
 
 @api_router.get("/files", response_model=List[FileResponse])
 async def get_files(current_user: Optional[User] = Depends(get_optional_user)):
     """Get files based on user permissions"""
     try:
         query = {}
-        
+
         # If user is authenticated, show their files
         if current_user:
             # Show files owned by user OR public files OR files shared with user
@@ -1821,9 +1921,9 @@ async def get_files(current_user: Optional[User] = Depends(get_optional_user)):
         else:
             # If no user, return empty list
             return []
-        
+
         files = await db.files.find(query, {"_id": 0}).sort("upload_date", -1).to_list(1000)
-        
+
         file_responses = []
         for file_doc in files:
             file_responses.append(FileResponse(
@@ -1846,133 +1946,108 @@ async def get_files(current_user: Optional[User] = Depends(get_optional_user)):
                 reacted=(current_user is not None and current_user.id in (file_doc.get('reactions') or [])),
                 folder_path=file_doc.get('folder_path')
             ))
-        
+
         return file_responses
-    
+
     except Exception as e:
         logger.error(f"Failed to fetch files: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch files: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch files")
 
 @api_router.get("/files/{file_id}/download")
 async def download_file(file_id: str, current_user: Optional[User] = Depends(get_optional_user)):
     """Download a file"""
     try:
-        # Get file metadata from MongoDB
         file_doc = await db.files.find_one({"id": file_id}, {"_id": 0})
-        
         if not file_doc:
             raise HTTPException(status_code=404, detail="File not found")
-        
-        # If it's a Google Drive file, redirect to Drive download
+
+        if not user_can_access(file_doc, current_user):
+            if not current_user:
+                raise HTTPException(status_code=403, detail="Authentication required for this file")
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        # If it's a Google Drive file, hand back the Drive download link
         if file_doc.get('source') == 'google_drive':
             drive_file_id = file_doc.get('drive_file_id')
             if drive_file_id:
-                # Return a direct download link
                 return {"download_url": f"https://drive.google.com/uc?export=download&id={drive_file_id}"}
-        
+
         file_path = UPLOAD_DIR / file_doc['filename']
-        
-        # Check permissions
-        if not file_doc.get('is_public', True):
-            if not current_user:
-                raise HTTPException(status_code=403, detail="Authentication required for this file")
-            if file_doc['owner_id'] != current_user.id and current_user.email not in file_doc.get('shared_with_users', []):
-                raise HTTPException(status_code=403, detail="Access denied")
-        
-        # Decrypt if needed
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="File not found on server")
+
+        if current_user:
+            await log_history(current_user.id, "download", file_doc['original_filename'], file_id)
+
+        media_type = file_doc.get('content_type') or 'application/octet-stream'
+        disposition = content_disposition("attachment", file_doc['original_filename'])
+        headers = {"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"}
+
         if file_doc.get('encrypted_key'):
-            with open(file_path, "rb") as f:
-                encrypted_content = f.read()
-            
-            decrypted_content = decrypt_file_content(encrypted_content, file_doc['encrypted_key'].encode('utf-8'))
-            
-            # Log history
-            # Note: We can't easily log history in a streaming response without background tasks, 
-            # but for now we'll log it here before returning.
-            # Ideally use BackgroundTasks
-            if current_user:
-                 await log_history(current_user.id, "download", file_doc['original_filename'], file_id)
-
-            return Response(
-                content=decrypted_content,
-                media_type=file_doc.get('content_type', 'application/octet-stream'),
-                headers={"Content-Disposition": f"attachment; filename={file_doc['original_filename']}"}
+            decrypted_content = decrypt_file_content(
+                file_path.read_bytes(), file_doc['encrypted_key'].encode('utf-8')
             )
+            return Response(content=decrypted_content, media_type=media_type, headers=headers)
 
-        return FastAPIFileResponse(
-            path=file_path,
-            filename=file_doc['original_filename'],
-            media_type=file_doc.get('content_type', 'application/octet-stream')
-        )
-    
+        return FastAPIFileResponse(path=file_path, media_type=media_type, headers=headers)
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Download failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Download failed")
 
 @api_router.get("/files/download-folder")
 async def download_folder(
     folder_path: str = Query(..., description="Folder name to download"),
     current_user: Optional[User] = Depends(get_optional_user)
 ):
-    """Download all files in a folder as a zip archive"""
+    """Download all of the caller's files in a folder as a zip archive"""
     try:
         if not current_user:
             raise HTTPException(status_code=401, detail="Authentication required")
-        
-        # Find all files whose folder_path starts with folder_path + "/"
-        # This matches files in the folder and its subfolders
-        regex_pattern = f"^{re.escape(folder_path)}/"
-        
+
+        folder = safe_relpath(folder_path)
+        if not folder:
+            raise HTTPException(status_code=400, detail="Invalid folder name")
+
+        # Matches files in the folder and its subfolders
         query = {
             "owner_id": current_user.id,
-            "folder_path": {"$regex": regex_pattern}
+            "folder_path": {"$regex": f"^{re.escape(folder)}/"},
         }
         files = await db.files.find(query, {"_id": 0}).to_list(1000)
-        
         if not files:
             raise HTTPException(status_code=404, detail="Folder not found or empty")
-        
-        # Create temp zip file
-        zip_filename = f"{folder_path}_{uuid.uuid4().hex[:8]}.zip"
-        zip_path = UPLOAD_DIR / zip_filename
-        
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+
+        # Build the archive in memory so no temp files are left in the uploads dir
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
             for file_doc in files:
                 stored_path = UPLOAD_DIR / file_doc['filename']
                 if not stored_path.exists():
                     continue
-                
-                # Use the stored folder_path as the arcname to preserve structure
-                arcname = file_doc.get('folder_path') or file_doc['original_filename']
-                
-                # Decrypt file
+                arcname = safe_relpath(file_doc.get('folder_path')) or safe_filename(file_doc['original_filename'])
+                raw = stored_path.read_bytes()
                 if file_doc.get('encrypted_key'):
-                    with open(stored_path, "rb") as f:
-                        encrypted = f.read()
-                    decrypted = decrypt_file_content(
-                        encrypted, 
-                        file_doc['encrypted_key'].encode('utf-8')
-                    )
-                    zf.writestr(arcname, decrypted)
-                else:
-                    zf.write(stored_path, arcname)
-        
-        # Return the zip file
-        response = FastAPIFileResponse(
-            path=zip_path,
-            filename=f"{folder_path}.zip",
-            media_type="application/zip"
+                    raw = decrypt_file_content(raw, file_doc['encrypted_key'].encode('utf-8'))
+                zf.writestr(arcname, raw)
+
+        zip_name = safe_filename(folder.split("/")[-1]) + ".zip"
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": content_disposition("attachment", zip_name),
+                "X-Content-Type-Options": "nosniff",
+            },
         )
-        
-        return response
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Folder download failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Folder download failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Folder download failed")
 
 
 @api_router.delete("/files/{file_id}")
@@ -1981,20 +2056,20 @@ async def delete_file(file_id: str, current_user: User = Depends(get_current_use
     try:
         # Get file metadata from MongoDB
         file_doc = await db.files.find_one({"id": file_id}, {"_id": 0})
-        
+
         if not file_doc:
             raise HTTPException(status_code=404, detail="File not found")
-        
+
         # Check ownership
         if file_doc['owner_id'] != current_user.id:
             raise HTTPException(status_code=403, detail="You don't have permission to delete this file")
-        
+
         # Delete file from disk (if it's an uploaded file)
         if file_doc.get('source') == 'upload':
             file_path = UPLOAD_DIR / file_doc['filename']
             if file_path.exists():
                 file_path.unlink()
-        
+
         # Delete metadata from MongoDB
         await db.files.delete_one({"id": file_id})
 
@@ -2009,12 +2084,12 @@ async def delete_file(file_id: str, current_user: User = Depends(get_current_use
         })
 
         return {"message": "File deleted successfully", "file_id": file_id}
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Delete failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Delete failed")
 
 @api_router.post("/files/{file_id}/react")
 async def react_to_file(file_id: str, current_user: User = Depends(get_current_user)):
@@ -2040,125 +2115,107 @@ async def preview_file(file_id: str, current_user: Optional[User] = Depends(get_
         file_doc = await db.files.find_one({"id": file_id}, {"_id": 0})
         if not file_doc:
             raise HTTPException(status_code=404, detail="File not found")
-        
-        # Check permissions
-        if not file_doc.get('is_public', True):
+
+        if not user_can_access(file_doc, current_user):
             if not current_user:
                 raise HTTPException(status_code=403, detail="Authentication required for this file")
-            if file_doc['owner_id'] != current_user.id and current_user.email not in file_doc.get('shared_with_users', []):
-                raise HTTPException(status_code=403, detail="Access denied")
-        
+            raise HTTPException(status_code=403, detail="Access denied")
+
         # Handle Drive files - redirect to Drive preview
         if file_doc.get('source') == 'google_drive':
             drive_file_id = file_doc.get('drive_file_id')
             if drive_file_id:
-                # Return redirect to Drive web view
-                from fastapi.responses import RedirectResponse
                 return RedirectResponse(url=f"https://drive.google.com/file/d/{drive_file_id}/preview")
             raise HTTPException(status_code=400, detail="Drive file ID not found")
-        
-        # Handle local files
+
         file_path = UPLOAD_DIR / file_doc['filename']
         if not file_path.exists():
             raise HTTPException(status_code=404, detail="File not found on server")
-        
-        # Decrypt if needed
+
+        content = file_path.read_bytes()
         if file_doc.get('encrypted_key'):
-            with open(file_path, "rb") as f:
-                encrypted_content = f.read()
-            content = decrypt_file_content(encrypted_content, file_doc['encrypted_key'].encode('utf-8'))
-        else:
-            with open(file_path, "rb") as f:
-                content = f.read()
-        
-        # Return file for inline viewing
-        return Response(
-            content=content,
-            media_type=file_doc.get('content_type', 'application/octet-stream'),
-            headers={
-                "Content-Disposition": f"inline; filename={file_doc['original_filename']}",
-                "Cache-Control": "public, max-age=3600"
-            }
-        )
-    
+            content = decrypt_file_content(content, file_doc['encrypted_key'].encode('utf-8'))
+
+        # Uploaded content is untrusted: it is shown inline, so stop browsers from
+        # sniffing types and run any HTML/SVG/XML in a sandbox without scripts.
+        media_type = file_doc.get('content_type') or 'application/octet-stream'
+        headers = {
+            "Content-Disposition": content_disposition("inline", file_doc['original_filename']),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=3600",
+        }
+        if any(t in media_type.lower() for t in ("html", "svg", "xml", "javascript")):
+            headers["Content-Security-Policy"] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+        return Response(content=content, media_type=media_type, headers=headers)
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Preview failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Preview failed")
 
 # ============================================================================
 # WebSocket for WebRTC Signaling
 # ============================================================================
+
+def _user_id_from_token(token: Optional[str]) -> Optional[str]:
+    """Return the user id inside a valid JWT, or None."""
+    if not token:
+        return None
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("sub")
+    except JWTError:
+        return None
+
 
 @app.websocket("/api/ws/{user_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
     user_id: str,
     username: str = Query(None),
-    emoji: str = Query(None)
+    emoji: str = Query(None),
+    token: str = Query(None),
 ):
-    """WebSocket endpoint for WebRTC signaling"""
-    await manager.connect(user_id, websocket, username, emoji)
-    # User came back online — cancel any pending guest message cleanup.
-    cancel_guest_msg_cleanup(user_id)
+    """WebSocket endpoint for WebRTC signaling. The JWT must belong to ``user_id``."""
+    if _user_id_from_token(token) != user_id:
+        # Accept-then-close so the browser sees a clean close code instead of a failed handshake.
+        await websocket.accept()
+        await websocket.close(code=4401)
+        return
+
+    await manager.connect(user_id, websocket, (username or "")[:USERNAME_MAX] or None, (emoji or "")[:8] or None)
     # User came back online — cancel any pending guest message cleanup.
     cancel_guest_msg_cleanup(user_id)
 
     try:
         while True:
             data = await websocket.receive_json()
+            if not isinstance(data, dict):
+                continue
             message_type = data.get("type")
-            
-            if message_type == "offer":
-                # Forward offer to target peer
-                target_id = data.get("target")
+            target_id = data.get("target")
+
+            if message_type in ("offer", "answer", "ice-candidate"):
+                # Relay signaling to the target peer, always stamping the real sender.
+                if not isinstance(target_id, str):
+                    continue
+                payload_key = {"offer": "offer", "answer": "answer", "ice-candidate": "candidate"}[message_type]
                 await manager.send_message(target_id, {
-                    "type": "offer",
-                    "offer": data.get("offer"),
-                    "sender": user_id
+                    "type": message_type,
+                    payload_key: data.get(payload_key),
+                    "sender": user_id,
                 })
-            
-            elif message_type == "answer":
-                # Forward answer to target peer
-                target_id = data.get("target")
-                await manager.send_message(target_id, {
-                    "type": "answer",
-                    "answer": data.get("answer"),
-                    "sender": user_id
-                })
-            
-            elif message_type == "ice-candidate":
-                # Forward ICE candidate to target peer
-                target_id = data.get("target")
-                await manager.send_message(target_id, {
-                    "type": "ice-candidate",
-                    "candidate": data.get("candidate"),
-                    "sender": user_id
-                })
-            
+
             elif message_type == "update_info":
-                # Update user info
-                username = data.get("username")
-                emoji = data.get("emoji")
+                new_name = data.get("username")
+                new_emoji = data.get("emoji")
                 if user_id in manager.user_info:
-                    if username:
-                        manager.user_info[user_id]["username"] = username
-                    if emoji:
-                        manager.user_info[user_id]["emoji"] = emoji
+                    if isinstance(new_name, str) and new_name.strip():
+                        manager.user_info[user_id]["username"] = new_name.strip()[:USERNAME_MAX]
+                    if isinstance(new_emoji, str) and new_emoji:
+                        manager.user_info[user_id]["emoji"] = new_emoji[:8]
                     await manager.broadcast_online_users()
-            
-            elif message_type == "update_info":
-                # Update user info
-                username = data.get("username")
-                emoji = data.get("emoji")
-                if user_id in manager.user_info:
-                    if username:
-                        manager.user_info[user_id]["username"] = username
-                    if emoji:
-                        manager.user_info[user_id]["emoji"] = emoji
-                    await manager.broadcast_online_users()
-    
+
     except WebSocketDisconnect:
         manager.disconnect(user_id)
         await manager.broadcast_online_users()
@@ -2199,13 +2256,13 @@ async def connect_drive(current_user: User = Depends(get_current_user)):
         client_id = os.getenv("GOOGLE_CLIENT_ID")
         client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
         redirect_uri = os.getenv("GOOGLE_DRIVE_REDIRECT_URI")
-        
+
         if not client_id or not client_secret:
             raise HTTPException(
                 status_code=500,
                 detail="Google Drive not configured. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env"
             )
-        
+
         flow = Flow.from_client_config(
             {
                 "web": {
@@ -2222,22 +2279,22 @@ async def connect_drive(current_user: User = Depends(get_current_user)):
             ],
             redirect_uri=redirect_uri
         )
-        
+
         authorization_url, state = flow.authorization_url(
             access_type='offline',
             include_granted_scopes='true',
             prompt='consent',
             state=current_user.id
         )
-        
+
         logger.info(f"Drive OAuth initiated for user {current_user.id}")
         return {"authorization_url": authorization_url}
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to initiate OAuth: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initiate OAuth: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to initiate OAuth")
 
 @api_router.get("/drive/callback")
 async def drive_callback(code: str = Query(...), state: str = Query(...)):
@@ -2247,7 +2304,7 @@ async def drive_callback(code: str = Query(...), state: str = Query(...)):
         client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
         redirect_uri = os.getenv("GOOGLE_DRIVE_REDIRECT_URI")
         frontend_url = os.getenv("FRONTEND_URL", os.getenv("REACT_APP_BACKEND_URL", ""))
-        
+
         flow = Flow.from_client_config(
             {
                 "web": {
@@ -2261,12 +2318,12 @@ async def drive_callback(code: str = Query(...), state: str = Query(...)):
             scopes=None,
             redirect_uri=redirect_uri
         )
-        
+
         flow.fetch_token(code=code)
         credentials = flow.credentials
-        
+
         logger.info(f"Drive credentials obtained for user {state}")
-        
+
         # Store credentials in database
         await db.drive_credentials.update_one(
             {"user_id": state},
@@ -2283,18 +2340,18 @@ async def drive_callback(code: str = Query(...), state: str = Query(...)):
             }},
             upsert=True
         )
-        
+
         # Update user's google_drive_connected status
         await db.users.update_one(
             {"id": state},
             {"$set": {"google_drive_connected": True}}
         )
-        
+
         logger.info(f"Drive credentials stored for user {state}")
-        
+
         # Redirect to frontend
         return RedirectResponse(url=f"{frontend_url}?drive_connected=true")
-    
+
     except Exception as e:
         logger.error(f"OAuth callback failed: {e}")
         frontend_url = os.getenv("FRONTEND_URL", os.getenv("REACT_APP_BACKEND_URL", ""))
@@ -2308,7 +2365,7 @@ async def get_drive_service(current_user: User):
             status_code=400,
             detail="Google Drive not connected. Please connect your Drive first."
         )
-    
+
     # Create credentials object
     creds = Credentials(
         token=creds_doc["access_token"],
@@ -2318,12 +2375,12 @@ async def get_drive_service(current_user: User):
         client_secret=creds_doc["client_secret"],
         scopes=creds_doc["scopes"]
     )
-    
+
     # Auto-refresh if expired
     if creds.expired and creds.refresh_token:
         logger.info(f"Refreshing expired token for user {current_user.id}")
         creds.refresh(GoogleRequest())
-        
+
         # Update in database
         await db.drive_credentials.update_one(
             {"user_id": current_user.id},
@@ -2340,23 +2397,23 @@ async def list_drive_files(current_user: User = Depends(get_current_user)):
     """List user's Google Drive files"""
     try:
         service = await get_drive_service(current_user)
-        
+
         # List files
         results = service.files().list(
             pageSize=100,
             fields="files(id, name, mimeType, size, webViewLink, iconLink)",
             q="trashed=false"
         ).execute()
-        
+
         files = results.get('files', [])
-        
+
         return [DriveFileInfo(**file) for file in files]
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to list Drive files: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list Drive files: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list Drive files")
 
 @api_router.post("/drive/share/{drive_file_id}", response_model=FileResponse)
 async def share_drive_file(
@@ -2368,25 +2425,25 @@ async def share_drive_file(
     """Share a Google Drive file through UniShare"""
     try:
         service = await get_drive_service(current_user)
-        
+
         # Get file metadata
         file_metadata = service.files().get(
             fileId=drive_file_id,
             fields="id, name, mimeType, size"
         ).execute()
-        
+
         file_size = int(file_metadata.get('size', 0))
-        
+
         # Check data limit
         if not await check_data_limit(current_user, file_size):
             raise HTTPException(
                 status_code=403,
                 detail="Guest data limit exceeded (2GB). Please create an account to continue sharing."
             )
-        
+
         # Parse shared_with
         shared_users = [email.strip() for email in shared_with.split(',') if email.strip()]
-        
+
         # Create metadata in our database
         file_id = str(uuid.uuid4())
         file_doc = FileMetadata(
@@ -2403,14 +2460,14 @@ async def share_drive_file(
             source="google_drive",
             drive_file_id=drive_file_id
         )
-        
+
         doc = file_doc.model_dump()
         doc['upload_date'] = doc['upload_date'].isoformat()
         await db.files.insert_one(doc)
-        
+
         # Update user's total data shared
         await update_user_data_shared(current_user.id, file_size)
-        
+
         # Log history
         visibility = "public" if is_public else ("shared" if shared_users else "private")
         await log_history(
@@ -2420,7 +2477,7 @@ async def share_drive_file(
             file_id,
             f"Imported from Google Drive ({visibility}, {file_size} bytes)"
         )
-        
+
         return FileResponse(
             id=file_id,
             filename=file_metadata['name'],
@@ -2438,24 +2495,24 @@ async def share_drive_file(
             drive_file_id=drive_file_id,
             shared_with_users=shared_users
         )
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to share Drive file: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to share Drive file: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to share Drive file")
 
 @api_router.post("/drive/save/{file_id}")
 async def save_to_drive(file_id: str, current_user: User = Depends(get_current_user)):
     """Save a UniShare file to Google Drive"""
     try:
         service = await get_drive_service(current_user)
-        
+
         # Get file from our database
         file_doc = await db.files.find_one({"id": file_id}, {"_id": 0})
         if not file_doc:
             raise HTTPException(status_code=404, detail="File not found")
-        
+
         # If it's already a Drive file, just return the link
         if file_doc.get('source') == 'google_drive':
             drive_file_id = file_doc.get('drive_file_id')
@@ -2464,45 +2521,45 @@ async def save_to_drive(file_id: str, current_user: User = Depends(get_current_u
                 "message": "File is already on Google Drive",
                 "drive_link": f"https://drive.google.com/file/d/{drive_file_id}/view"
             }
-        
+
         # Read the local file
         file_path = UPLOAD_DIR / file_doc['filename']
         if not file_path.exists():
             raise HTTPException(status_code=404, detail="File not found on server")
-        
+
         # Upload to Google Drive
         from googleapiclient.http import MediaFileUpload
-        
+
         file_metadata = {
             'name': file_doc['original_filename']
         }
-        
+
         media = MediaFileUpload(
             str(file_path),
             mimetype=file_doc.get('content_type', 'application/octet-stream'),
             resumable=True
         )
-        
+
         drive_file = service.files().create(
             body=file_metadata,
             media_body=media,
             fields='id, webViewLink'
         ).execute()
-        
+
         logger.info(f"File {file_id} saved to Drive as {drive_file.get('id')}")
-        
+
         return {
             "success": True,
             "drive_file_id": drive_file.get('id'),
             "drive_link": drive_file.get('webViewLink'),
             "message": "File saved to Google Drive successfully"
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to save to Drive: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to save to Drive: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to save to Drive")
 
 # ============================================================================
 # Main App Configuration
@@ -2520,7 +2577,7 @@ app.include_router(api_router)
 async def add_security_headers(request: Request, call_next):
     start_time = time.time()
     response = await call_next(request)
-    
+
     # Security headers
     response.headers["X-Content-Type-Options"] = "nosniff"
     # Preview endpoint must be iframable for inline PDF/text/Office viewer.
@@ -2532,17 +2589,17 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-    
+
     # Add processing time header
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = str(process_time)
-    
+
     # Cache control for API responses (no caching)
     if request.url.path.startswith("/api"):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
-    
+
     return response
 
 # GZip compression for responses larger than 1KB

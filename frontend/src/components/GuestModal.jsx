@@ -80,7 +80,7 @@ const GuestModal = ({ isOpen, onClose, onSubmit, error, onClearError }) => {
 
           <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
             <p className="text-sm text-yellow-800 dark:text-yellow-200">
-              <strong>Guest Mode:</strong> Your files will be saved locally. Create an account to access them from anywhere!
+              <strong>Guest Mode:</strong> Guest files are stored on the server for this session only. Create an account to keep them and access them from any device.
             </p>
           </div>
 

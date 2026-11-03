@@ -89,24 +89,40 @@ Other backend variables:
 
 RSA/Fernet keys are auto-generated on first boot into `<data dir>/keys/`. Keep that directory: files already uploaded can only be decrypted with the key that encrypted them.
 
-## Data Limits
+## Data Limits and Validation
 
 - **Guest users:** 2 GB total (enforced server-side)
 - **Registered users:** no total cap
-- **Cloud upload:** 100 MB per file; use P2P for anything larger
+- **Cloud upload:** 100 MB per file, read in chunks and rejected with `413` when over the limit; use P2P for anything larger
+- **Usernames:** 2-32 characters. **Passwords:** 8-128 characters. Invalid input returns `422`.
+- **Uploads:** filenames, extensions and folder paths are sanitised; a file can be shared with at most 50 users.
+- **Downloads and previews** check ownership, public status or the share list first. Previews of HTML, SVG and XML are served with a sandboxing Content-Security-Policy.
 
-## Tests
+## WebSocket Authentication
+
+`/api/ws/{user_id}` requires the caller's JWT as `?token=...` and the token must belong to `user_id`; otherwise the socket is closed with code `4401`. Signaling messages (offer, answer, ICE candidate) are relayed with the authenticated sender id, not one supplied by the client.
+
+## Tests and Lint
 
 ```bash
+# backend: 60 tests, in-memory database and a temporary data directory
 pip install -r backend/requirements-dev.txt
 python -m pytest tests
+ruff check backend tests
+
+# frontend: 8 jest tests and ESLint
+cd frontend
+npm ci
+CI=true npx craco test --watchAll=false
+npm run lint
 ```
 
-The backend tests run against an in-memory database and a temporary data directory. They cover auth, upload/download with encryption on disk, private-file access control, deletion, chat validation and admin permissions. The frontend has no automated tests; CI only checks that it builds.
+The backend tests cover registration and login validation, upload limits and sanitising, encrypted storage, download and preview access control, sharing, folder zips, chat (edit, delete, react, pin), admin block/unblock/delete and WebSocket auth and signaling. The frontend tests only cover small utilities (class names, auth storage, ICE server config, offline mode); the UI and the WebRTC code are not covered by automated tests. ESLint reports no errors but still has warnings (unused variables, hook dependencies). CI runs all of the above plus a production build.
 
 ## Deployment
 
-- Backend: Dockerized FastAPI. `render.yaml` describes a Render web service; it needs a MongoDB connection string (for example MongoDB Atlas) and a persistent disk for `UNISHARE_DATA_DIR`, otherwise uploads and keys are lost on redeploy.
+- Backend: Dockerized FastAPI. `render.yaml` describes a Render web service; it needs a MongoDB connection string (MongoDB Atlas has a free M0 shared cluster, 512 MB) and a persistent disk for `UNISHARE_DATA_DIR`, otherwise uploads and keys are lost on redeploy.
+- Free hosting caveat: Render's free web service has an ephemeral disk and spins down after 15 minutes idle, so uploads and keys would not survive there. Free tiers are fine for trying the app, not for keeping files.
 - Frontend: React build served by nginx; `REACT_APP_BACKEND_URL` must point at the deployed backend.
 
 ### Why there is no hosted demo
@@ -119,6 +135,7 @@ The app needs three things that a serverless host such as Vercel does not provid
 backend/    FastAPI server (server.py), requirements*.txt
 frontend/   React 18 + CRACO + Tailwind + shadcn/ui
 tests/      backend tests (pytest)
+frontend/src/__tests__/   frontend tests (jest)
 ```
 
 ## Author

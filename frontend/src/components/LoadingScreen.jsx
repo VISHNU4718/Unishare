@@ -7,15 +7,11 @@ import { Share2, Zap } from 'lucide-react';
  */
 
 const MESSAGES = [
-  'Encrypting quantum tunnels...',
-  'Aligning file glyphs...',
-  'Charging P2P relays...',
-  'Calibrating signal...',
-  'Warming up WebRTC...',
-  'Syncing constellation...',
+  'Starting UniShare...',
+  'Connecting to the server...',
 ];
 
-const LoadingScreen = ({ onBeginExit, onFinished, minDuration = 3200 }) => {
+const LoadingScreen = ({ onBeginExit, onFinished, minDuration = 1200 }) => {
   const [progress, setProgress] = useState(0);
   const [msgIdx, setMsgIdx] = useState(0);
   const [exiting, setExiting] = useState(false);

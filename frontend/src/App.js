@@ -4,7 +4,7 @@ import { Routes, Route, useNavigate, useLocation, Link } from 'react-router-dom'
 import { Moon, Sun, LogOut, Upload as UploadIcon, HardDrive, History, LogIn, FileText, Menu, X, MessageCircle, Pencil, Share2, Zap } from 'lucide-react';
 import { useTheme } from './contexts/ThemeContext';
 import { useAuth } from './contexts/AuthContext';
-import { setAuthToken } from './utils/authStorage';
+import { setAuthToken, getAuthToken } from './utils/authStorage';
 import GuestModal from './components/GuestModal';
 import AuthModal from './components/AuthModal';
 import LoginPage from './components/LoginPage';
@@ -29,7 +29,6 @@ import ProfileModal from './components/ProfileModal';
 import AmbientBackground from './components/AmbientBackground';
 import P2PReceivedPreviewModal from './components/P2PReceivedPreviewModal';
 import LoadingScreen from './components/LoadingScreen';
-import MobileDebugger from './components/MobileDebugger';
 import webrtcManager from './utils/webrtcManager2';
 import { isOfflineMode } from './utils/offline';
 import './App.css';
@@ -598,7 +597,7 @@ function App() {
   };
 
   const handleDownloadFolder = (folder) => {
-    const authToken = localStorage.getItem('unishare_token') || '';
+    const authToken = getAuthToken() || '';
     const link = document.createElement('a');
     link.href = `${API}/files/download-folder?folder_path=${encodeURIComponent(folder.folderName)}&token=${encodeURIComponent(authToken)}`;
     link.setAttribute('download', '');
