@@ -1,12 +1,12 @@
-const envBackend = process.env.REACT_APP_BACKEND_URL || '';
-
-export const getBackendUrl = () => {
-  if (envBackend) return envBackend;
-  const protocol = window.location.protocol;
-  const hostname = window.location.hostname;
-  const port = window.location.port;
-  const backendPort = port === '3001' ? '8001' : String(parseInt(port) + 5000);
-  return `${protocol}//${hostname}:${backendPort}`;
+export const resolveBackendUrl = (location, configured = '') => {
+  const explicit = configured.trim().replace(/\/+$/, '');
+  if (explicit) return explicit;
+  if (process.env.NODE_ENV === 'development' && ['3000', '3001'].includes(location.port)) {
+    return `${location.protocol}//${location.hostname}:8001`;
+  }
+  return location.origin;
 };
+
+export const getBackendUrl = () => resolveBackendUrl(window.location, process.env.REACT_APP_BACKEND_URL || '');
 
 export const getApiUrl = () => `${getBackendUrl()}/api`;

@@ -8,7 +8,7 @@ Full-stack file-sharing platform with peer-to-peer transfers, encrypted storage,
 
 ## Features
 
-- **Multiple sharing paths** — direct upload/download, WebRTC P2P transfers (LAN & offline), Bluetooth sharing, QR code sharing, social sharing, optional Google Drive integration
+- **Multiple sharing paths** — direct upload/download, WebRTC P2P transfers, QR code sharing, social sharing, optional Google Drive integration
 - **Encryption at rest** — each upload is encrypted with a per-file Fernet key, then RSA-wrapped (2048-bit) before hitting disk
 - **Guest & registered users** — anonymous guest access (2 GB cap) or full accounts with unlimited storage
 - **Real-time chat** — WebSocket chat with reactions and message pinning
@@ -105,12 +105,12 @@ RSA/Fernet keys are auto-generated on first boot into `<data dir>/keys/`. Keep t
 ## Tests and Lint
 
 ```bash
-# backend: 60 tests, in-memory database and a temporary data directory
+# backend tests, in-memory database and a temporary data directory
 pip install -r backend/requirements-dev.txt
 python -m pytest tests
 ruff check backend tests
 
-# frontend: 8 jest tests and ESLint
+# frontend: utility, URL routing and P2P transfer regression tests, plus ESLint
 cd frontend
 npm ci
 CI=true npx craco test --watchAll=false
@@ -128,6 +128,33 @@ The backend tests cover registration and login validation, upload limits and san
 ### Why there is no hosted demo
 
 The app needs three things that a serverless host such as Vercel does not provide: long-lived WebSocket connections (chat and P2P signaling), a persistent disk for encrypted uploads and the server keys, and one shared MongoDB. Running it there would silently lose data between requests, so no live demo is published. Run it with Docker as above.
+
+### Disposable local demo (no MongoDB installation)
+
+Install Python 3.11–3.13 and Node 20 or newer, then run:
+
+```bash
+pip install -r backend/requirements-dev.txt
+cd frontend
+npm ci
+REACT_APP_DEMO_MODE=true npm run build
+cd ..
+python backend/demo.py
+```
+
+On PowerShell, set the build flag with `$env:REACT_APP_DEMO_MODE='true'` before `npm run build`.
+Open http://127.0.0.1:8001. This uses the real API, encrypted files and WebSocket signaling,
+with an in-memory database and temporary storage. Everything resets on restart. It binds
+only to the local computer and is not a persistent public deployment.
+
+To verify it: enter as a guest, upload a sample text file using the Upload tab, preview and
+download it, then open an independent browser profile for a second guest. Send a chat
+message and transfer a file between both guests. For a P2P link, keep the sender tab open.
+Cross-network WebRTC may require a TURN relay; public STUN servers alone cannot traverse
+every firewall. Google Drive requires separate OAuth credentials and is optional.
+
+Bluetooth is experimental code for a custom BLE peripheral, not browser-to-browser file
+sharing, and is not exposed as a supported sharing path in the current interface.
 
 ## Project Layout
 

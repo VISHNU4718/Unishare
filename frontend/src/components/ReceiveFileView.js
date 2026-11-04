@@ -4,6 +4,7 @@ import { Download, Loader2, FileText, CheckCircle, AlertCircle, Wifi } from 'luc
 import { useAuth } from '../contexts/AuthContext';
 import webrtcManager from '../utils/webrtcManager2';
 import { isOfflineMode } from '../utils/offline';
+import { getBackendUrl } from '../utils/backendUrl';
 
 const formatBytes = (bytes) => {
     if (!bytes && bytes !== 0) return '';
@@ -96,7 +97,7 @@ const ReceiveFileView = () => {
             }
 
             if (!webrtcManager.userId && currentUser) {
-                webrtcManager.connect(currentUser.id, '', currentUser.username, currentUser.emoji);
+                webrtcManager.connect(currentUser.id, getBackendUrl(), currentUser.username, currentUser.emoji);
             }
 
             if (!webrtcManager.isSignalingReady()) {

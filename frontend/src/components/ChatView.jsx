@@ -1,3 +1,4 @@
+import { getBackendUrl } from '../utils/backendUrl';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Send, Smile, Trash2, Pin, PinOff, Reply, X, AlertCircle, VolumeX, WifiOff, Users, Circle, Eraser, ShieldAlert } from 'lucide-react';
@@ -7,15 +8,6 @@ import { toastError, toastSuccess } from '../utils/toast';
 
 const CHAT_BC_NAME = 'unishare-chat-v1';
 
-const envBackend = process.env.REACT_APP_BACKEND_URL || '';
-const getBackendUrl = () => {
-  if (envBackend) return envBackend;
-  const protocol = window.location.protocol;
-  const hostname = window.location.hostname;
-  const port = window.location.port;
-  const backendPort = port === '3001' ? '8001' : String(parseInt(port) + 5000);
-  return `${protocol}//${hostname}:${backendPort}`;
-};
 const BACKEND_URL = getBackendUrl();
 const API = `${BACKEND_URL}/api`;
 const REACTION_PALETTE = ['👍', '❤️', '😂', '😮', '😢', '🎉'];

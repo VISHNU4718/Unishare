@@ -1223,26 +1223,6 @@ async def admin_list_files(admin: User = Depends(get_admin_user)):
     return docs
 
 
-@api_router.delete("/admin/files/{file_id}")
-async def admin_delete_file(file_id: str, admin: User = Depends(get_admin_user)):
-    file_doc = await db.files.find_one({"id": file_id}, {"_id": 0})
-    if not file_doc:
-        raise HTTPException(status_code=404, detail="File not found")
-
-    if file_doc.get("source") == "upload":
-        try:
-            p = UPLOAD_DIR / file_doc["filename"]
-            if p.exists():
-                p.unlink()
-        except Exception as ex:
-            logger.warning(f"admin delete: disk unlink failed for {file_id}: {ex}")
-
-    await db.files.delete_one({"id": file_id})
-    await update_user_data_shared(file_doc["owner_id"], -file_doc.get("size", 0))
-    await log_history(admin.id, "admin_delete", file_doc.get("original_filename", file_id), file_id)
-    return {"success": True}
-
-
 @api_router.delete("/admin/files/bulk-delete")
 async def admin_bulk_delete_files(file_ids: List[str] = Query(..., description="Comma-separated file IDs to delete"), admin: User = Depends(get_admin_user)):
     """Bulk delete files by IDs. Returns counts of deleted and not-found."""
@@ -1276,6 +1256,26 @@ async def admin_bulk_delete_files(file_ids: List[str] = Query(..., description="
         "not_found_count": len(not_found),
         "failed_count": len(failed)
     }
+
+
+@api_router.delete("/admin/files/{file_id}")
+async def admin_delete_file(file_id: str, admin: User = Depends(get_admin_user)):
+    file_doc = await db.files.find_one({"id": file_id}, {"_id": 0})
+    if not file_doc:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if file_doc.get("source") == "upload":
+        try:
+            p = UPLOAD_DIR / file_doc["filename"]
+            if p.exists():
+                p.unlink()
+        except Exception as ex:
+            logger.warning(f"admin delete: disk unlink failed for {file_id}: {ex}")
+
+    await db.files.delete_one({"id": file_id})
+    await update_user_data_shared(file_doc["owner_id"], -file_doc.get("size", 0))
+    await log_history(admin.id, "admin_delete", file_doc.get("original_filename", file_id), file_id)
+    return {"success": True}
 
 
 @api_router.post("/admin/users/{user_id}/block")

@@ -108,3 +108,6 @@ frontend.log
 
 # Generated encryption keys
 backend/keys/
+
+# Local verification artifacts
+work/

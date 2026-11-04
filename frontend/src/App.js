@@ -1,3 +1,4 @@
+import { getBackendUrl } from './utils/backendUrl';
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Routes, Route, useNavigate, useLocation, Link } from 'react-router-dom';
@@ -33,15 +34,6 @@ import webrtcManager from './utils/webrtcManager2';
 import { isOfflineMode } from './utils/offline';
 import './App.css';
 
-const envBackend = process.env.REACT_APP_BACKEND_URL || '';
-const getBackendUrl = () => {
-  if (envBackend) return envBackend;
-  const protocol = window.location.protocol;
-  const hostname = window.location.hostname;
-  const port = window.location.port;
-  const backendPort = port === '3001' ? '8001' : String(parseInt(port) + 5000);
-  return `${protocol}//${hostname}:${backendPort}`;
-};
 const BACKEND_URL = getBackendUrl();
 const API = `${BACKEND_URL}/api`;
 

@@ -302,7 +302,7 @@ class WebRTCManager {
           fileInfo.chunks[message.index] = bytes;
           fileInfo.receivedSize += bytes.length;
 
-          const progress = (fileInfo.receivedSize / fileInfo.size) * 100;
+          const progress = fileInfo.size ? (fileInfo.receivedSize / fileInfo.size) * 100 : 100;
 
           // Update progress
           if (this.onProgressUpdate) {
@@ -366,14 +366,7 @@ class WebRTCManager {
     }
 
     const fileId = Math.random().toString(36).substr(2, 9);
-
-    return new Promise((resolve, reject) => {
-      try {
-        this.sendFileWithId(peerId, file, fileId, onProgress, resolve);
-      } catch (err) {
-        reject(err);
-      }
-    });
+    return this.sendFileWithId(peerId, file, fileId, onProgress);
   }
 
   async sendFileViaBroadcast(peerId, file, onProgress) {
@@ -464,79 +457,42 @@ class WebRTCManager {
       throw new Error('Data channel not ready');
     }
 
-    const CHUNK_SIZE = 16384; // 16KB chunks
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-
-    // Send file metadata (includes sender so receiver UI can show who it's from)
+    const CHUNK_SIZE = 16384;
+    const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
     dataChannel.send(JSON.stringify({
-      type: 'file-metadata',
-      fileId,
-      name: file.name,
-      size: file.size,
-      mimeType: file.type,
-      totalChunks,
-      sender: {
-        userId: this.userId,
-        username: this.username,
-        emoji: this.emoji
-      }
+      type: 'file-metadata', fileId, name: file.name, size: file.size,
+      mimeType: file.type, totalChunks,
+      sender: { userId: this.userId, username: this.username, emoji: this.emoji }
     }));
-
-    // Send file in chunks
-    const reader = new FileReader();
-    let offset = 0;
-    let chunkIndex = 0;
     const startTime = Date.now();
-
-    const sendNextChunk = () => {
-      const slice = file.slice(offset, offset + CHUNK_SIZE);
-      reader.readAsArrayBuffer(slice);
-    };
-
-    reader.onload = (event) => {
-      const chunk = event.target.result;
-      const chunkData = btoa(String.fromCharCode(...new Uint8Array(chunk)));
-
-      // Send chunk
+    for (let index = 0; index < totalChunks; index++) {
+      if (dataChannel.readyState !== 'open') throw new Error('Peer disconnected during transfer');
+      const deadline = Date.now() + 15000;
+      while (dataChannel.bufferedAmount > 1024 * 1024) {
+        if (dataChannel.readyState !== 'open') throw new Error('Peer disconnected during transfer');
+        if (Date.now() > deadline) throw new Error('Peer transfer timed out');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      const chunk = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error('Could not read file'));
+        reader.onabort = () => reject(new Error('File read cancelled'));
+        reader.readAsArrayBuffer(file.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE));
+      });
       dataChannel.send(JSON.stringify({
-        type: 'file-chunk',
-        fileId,
-        index: chunkIndex,
-        data: chunkData,
-        totalChunks
+        type: 'file-chunk', fileId, index, totalChunks,
+        data: btoa(String.fromCharCode(...new Uint8Array(chunk)))
       }));
-
-      offset += chunk.byteLength;
-      chunkIndex++;
-
-      // Calculate progress
-      const progress = (offset / file.size) * 100;
-      const elapsed = (Date.now() - startTime) / 1000;
+      const offset = Math.min(file.size, (index + 1) * CHUNK_SIZE);
+      const elapsed = Math.max((Date.now() - startTime) / 1000, 0.001);
       const speed = offset / elapsed;
-      const remaining = (file.size - offset) / speed;
-
-      if (onProgress) {
-        onProgress({
-          progress: Math.round(progress),
-          speed,
-          timeRemaining: remaining
-        });
-      }
-
-      if (offset < file.size) {
-        // Send next chunk with a small delay to avoid overwhelming
-        setTimeout(sendNextChunk, 10);
-      } else {
-        console.log('File sent successfully');
-        if (onComplete) onComplete();
-      }
-    };
-
-    reader.onerror = (error) => {
-      console.error('Error reading file:', error);
-    };
-
-    sendNextChunk();
+      if (onProgress) onProgress({
+        progress: file.size ? Math.round(offset / file.size * 100) : 100,
+        speed, timeRemaining: speed ? (file.size - offset) / speed : 0
+      });
+    }
+    if (onComplete) onComplete();
   }
 
   async initiateConnection(peerId) {

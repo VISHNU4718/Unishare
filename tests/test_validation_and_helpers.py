@@ -353,6 +353,17 @@ def test_admin_can_delete_any_file(client, guest):
 
 # -------------------------------------------------------------------- websocket
 
+def test_admin_bulk_delete_uses_static_route(client, guest):
+    headers, _ = guest
+    first = upload(client, headers).json()
+    second = upload(client, headers).json()
+    response = client.delete('/api/admin/files/bulk-delete', headers=admin_headers(client),
+                             params=[('file_ids', first['id']), ('file_ids', second['id'])])
+    assert response.status_code == 200, response.text
+    assert response.json()['deleted_count'] == 2
+    assert client.get(first['download_url']).status_code == 404
+
+
 def test_websocket_rejects_missing_or_foreign_token(client, guest):
     from starlette.websockets import WebSocketDisconnect
 
